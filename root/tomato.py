@@ -1,6 +1,4 @@
 from flask import Flask, render_template, request, jsonify
-from keras.preprocessing.image import load_img, img_to_array
-from keras.models import load_model
 from collections import OrderedDict
 import numpy as np
 import uuid
@@ -8,47 +6,50 @@ import os
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
+import tensorflow as tf
 
 app = Flask(__name__)
 
-# Memuat model buatan sendiri
-model = load_model('./tomato.h5')
+# --- Load Model TFLite ---
+interpreter = tf.lite.Interpreter(model_path="./tomato.tflite")
+interpreter.allocate_tensors()
 
+# Ambil detail input dan output
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# --- Daftar kelas (label) sesuai model ---
+class_names = ["bacterial", "early", "mold", "target spot", "yellow", "healthy"]
 
 
 @app.route('/', methods=['POST', 'GET'])
 def predict():
     try:
         if request.method == 'POST':
-            # Memastikan file gambar ada di request
+            # Cek apakah file gambar dikirim
             if 'imagefile' not in request.files:
                 raise ValueError("No image file found in the request.")
 
             imagefile = request.files['imagefile']
-            print(imagefile)
 
-            # Validasi file tidak kosong
             if imagefile.filename == '':
                 raise ValueError("The uploaded image file is empty.")
 
-            # image_path = "./images/" + imagefile.filename
-            # imagefile.save(image_path)
+            # Baca dan ubah ukuran gambar sesuai input model
+            image = Image.open(BytesIO(imagefile.read())).convert('RGB')
+            image = image.resize((150, 150))  # Sesuaikan dengan ukuran input model
+            image = np.array(image, dtype=np.float32)
+            image = image / 255.0  # Normalisasi (pastikan sesuai training model)
+            image = np.expand_dims(image, axis=0)
 
-            # Memuat dan mengubah ukuran gambar sesuai dengan input model
-            image = Image.open(BytesIO(imagefile.read()))
-            image = image.resize((150,150))  # Sesuaikan dengan ukuran input model Anda
-            image = img_to_array(image)
-            image = image.reshape((1, image.shape[0], image.shape[1], image.shape[2]))  # Menyesuaikan dimensi input
+            # Jalankan prediksi TFLite
+            interpreter.set_tensor(input_details[0]['index'], image)
+            interpreter.invoke()
+            yhat = interpreter.get_tensor(output_details[0]['index'])
 
-            # Melakukan prediksi
-            yhat = model.predict(image)
+            predicted_class = class_names[np.argmax(yhat)]
 
-            # Mengasumsikan output model berupa probabilitas untuk beberapa kelas
-            class_names = ["bacterial", "early", "mold", "target spot", "yellow", "healthy"]  # Pastikan sesuai dengan label model
-            predicted_class = class_names[np.argmax(yhat)]  # Memilih kelas dengan probabilitas tertinggi
-
-            
-            # Description and actions based on class
+            # Deskripsi dan tindakan
             if predicted_class == "healthy":
                 description = "Green, medium to large leaves."
                 action = "Water 1-2 times daily, add compost biweekly, ensure 4-6 hours of sunlight."
@@ -71,8 +72,7 @@ def predict():
                 description = "Unknown class"
                 action = "No action available"
 
-
-            # Menyusun response dalam format JSON
+            # Buat response JSON
             response = OrderedDict({
                 "status": "success",
                 "status_code": 200,
@@ -86,21 +86,20 @@ def predict():
 
             return jsonify(response)
 
+        # Jika GET
         return jsonify({
             "status": "success",
             "message": "Please upload an image for prediction."
         }), 200
 
     except Exception as e:
-        # Menyusun response untuk error
-        response = {
+        return jsonify({
             "status": "failed",
-            "status_code": 400,  # Bad Request
+            "status_code": 400,
             "message": str(e)
-        }
-        return jsonify(response), 400
+        }), 400
 
-# Penanganan error global untuk route yang tidak ditemukan
+
 @app.errorhandler(404)
 def not_found_error(error):
     return jsonify({
@@ -109,7 +108,7 @@ def not_found_error(error):
         "message": "The requested resource was not found."
     }), 404
 
-# Penanganan error global untuk error server
+
 @app.errorhandler(500)
 def server_error(error):
     return jsonify({
@@ -117,6 +116,7 @@ def server_error(error):
         "status_code": 500,
         "message": "An internal server error occurred. Please try again later."
     }), 500
+
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 8080))
